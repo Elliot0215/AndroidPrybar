@@ -14,11 +14,19 @@ Supports multi-process, multi-thread, and high concurrency, tracing multiple fun
 
 ## Changelog
 
+**Stability & fidelity (latest round)** — making "running inside the VCPU" match "running on a real device" field-by-field:
+
+- **Faithful fork / vfork**: when traced code reaches `fork`/`vfork`, the child continues **natively at the location the host would have executed** (rather than forking in-place inside the VCPU); vfork's parent-suspend + shared-memory semantics are preserved. Verified field-by-field against host-vs-VM differential runs.
+- **Faithful signal handling**: registration goes through the real `sigaction`, delivery is emulated by the VCPU; the handler's return address uses a real sigreturn trampoline (no more magic sentinel — removes a fingerprint); `SIGSEGV`/`SIGILL` instruction retry, `si_addr`/`fault_address`, and signal-mask pending/unblock semantics all align with a real device.
+- **Concurrency robustness**: fixed several races and hangs under concurrent trace + fork (execution-resource lifetime, resetting locks inherited by the fork child).
+- **More robust external-call recognition**: intercepted functions are identified by an **address set** rather than by symbol name, covering platform interposition (e.g. `libsigchain`), GOT/PLT, and IFUNC entry points — so symbol variants (like `__memcpy_aarch64`) are no longer missed.
+
+**Earlier:**
+
 - Added `vc_set_trace_crash_flush()`: force-flush the trace buffer to disk before the app crashes / terminates / exits, so the portion before the crash point is never lost.
 - `trace_receiver.py` now decompresses via the lz4 C engine (`pip install lz4`), greatly speeding up `decode`; falls back to pure Python automatically if the package is missing.
 - Added `trace_unidbg_dump()`: one-shot export of a Unidbg "mid-execution" dump package (memory segments / registers / arguments / symbols / JNI table / maps / rootfs).
 - README: added a Frida example for calling `trace()`.
-- Fixed a number of bugs.
 
 ## Where is `libtrace.so`
 
@@ -135,6 +143,15 @@ The repo ships a **Claude Code skill: `unicorn-trace`**. When you open this repo
 - `SKILL.md`: a concise quick reference (the two entry points, API cheat sheet, hook types, worked-example index, trace format, performance, limits).
 - `GUIDE.md`: the full guide (complete API + worked examples + trace format).
 - To use it in another project: copy `.claude/skills/unicorn-trace/` into that project's `.claude/skills/` or the user-level `~/.claude/skills/`.
+
+## Known limitations
+
+- ARM64 only, Android 10+; traces native code only, not Java methods.
+- Function-level VCPU, not a whole-process emulator.
+- No nested VCPU: calling `vc_make_handle` / `trace` from inside a traced function deadlocks.
+- Jump control is blacklist-only (no whitelist).
+- In file mode, the tail before a crash point may be lost (LZ4 buffer not flushed); use `vc_set_trace_crash_flush()` to keep the pre-crash segment.
+- Automatic thread tracing (`vc_set_auto_trace_threads`) is **off by default**; enable it on demand.
 
 ## Community / contact
 

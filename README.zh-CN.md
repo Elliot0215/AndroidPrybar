@@ -14,11 +14,19 @@ VCPU 是闭源的引擎内核，`trace/` 则是它上面一层**开源**的示�
 
 ## 更新记录
 
+**稳定性与忠实度（最新一轮）** —— 让"在 VCPU 里执行"和"在真机上执行"尽量逐字段一致：
+
+- **fork / vfork 忠实执行**：被 trace 的代码执行到 `fork`/`vfork` 时，子进程在**宿主原本该执行的位置**以 native 方式继续（而不是在 VCPU 内就地 fork）；vfork 的父挂起 + 共享内存语义也保留。host-vs-VM 差分逐字段验证一致。
+- **信号处理忠实化**：注册走真实 `sigaction`、触发由 VCPU 模拟；handler 的返回地址用真实的 sigreturn trampoline（不再是魔法值，去掉指纹）；`SIGSEGV`/`SIGILL` 的指令重试、`si_addr`/`fault_address`、信号掩码的 pending/解除语义都与真机对齐。
+- **并发健壮性**：修复多线程并发 trace + fork 下的若干竞态与卡死（执行资源生命周期、fork 子进程继承锁复位）。
+- **外部调用识别更鲁棒**：以**地址集合**而非符号名为依据识别被拦截的函数，覆盖平台 interpose（如 `libsigchain`）、GOT/PLT、IFUNC 等入口，避免符号变体（`__memcpy_aarch64` 之类）漏拦。
+
+**此前**：
+
 - 新增 `vc_set_trace_crash_flush()`：app 崩溃/终止/exit 前强制把 trace 缓冲刷到磁盘，不丢崩溃点之前那段
 - `trace_receiver.py` 解压改用 lz4 C 引擎（`pip install lz4`），decode 大幅加速；未安装则自动回退纯 Python
 - 新增 `trace_unidbg_dump()`：一键导出 Unidbg「中段执行」dump 包（内存段/寄存器/参数/符号/JNI 表/maps/rootfs）
 - README 增加 Frida 调用 `trace()` 的示例
-- 修复了部分 bug
 
 ## `libtrace.so` 你拿来就用，如果你想修改 trace 日志格式，你可以自己改
 
@@ -136,6 +144,15 @@ AndroidPrybar/
 - `SKILL.md`：精简速查（两个入口、API 速查表、Hook 类型、实战示例索引、trace 格式、性能、限制）。
 - `GUIDE.md`：完整指南（完整 API + 实战示例 + trace 格式）。
 - 想在别的项目用：把 `.claude/skills/unicorn-trace/` 复制到那个项目的 `.claude/skills/` 或用户级 `~/.claude/skills/`。
+
+## 已知限制
+
+- 仅 ARM64，Android 10+；只能 trace native，不能 trace Java 方法。
+- 单函数级 VCPU，不是全进程模拟器。
+- 不支持 VCPU 嵌套：被 trace 的函数内部再调 `vc_make_handle` / `trace` 会死锁。
+- 跳转控制只有 blacklist，无 whitelist。
+- 文件模式崩溃点前数据可能丢尾（LZ4 缓冲未 flush）；需要保住崩溃前那段用 `vc_set_trace_crash_flush()`。
+- 自动线程追踪（`vc_set_auto_trace_threads`）**默认关**，按需开启。
 
 ## 交流群 / 联系方式
 
