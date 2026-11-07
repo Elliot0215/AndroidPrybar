@@ -43,6 +43,49 @@ const wrapper = trace(target, path);      // 返回同签名的包装函数指�
 Interceptor.replace(target, wrapper);     // 替换到原地址，之后 app 调用自动走 VM trace
 ```
 
+#### 只想采一次就还原入口：trace 完成后自动取消 hook（可选）
+
+有时你只想采一遍这个函数就把入口还回去，不想它被反复 trace 拖慢。可以用 **3 参版 `trace()`** 拿到
+`ctx`，再挂一个 `VC_HOOK_EMU_STOP`（**目标函数 ret 正常返回 / 模拟停机**时触发，也就是「这一趟 trace 跑完」的
+回调），在回调里 `Interceptor.revert` 把入口还原：
+
+```javascript
+// 续上例：改用 3 参版 trace 拿 ctx，并在「trace 跑完」回调里还原入口
+const trace3 = new NativeFunction(
+    Module.getExportByName("libtrace.so", "_Z5tracePvPcPP10vm_context"), // trace(void*, char*, vm_context**)
+    'pointer', ['pointer', 'pointer', 'pointer']);
+
+// vc_* 是 C++ mangled 名，但 mangled 名里含函数名子串，按子串找即可（无需手写完整 mangled）
+function sym(lib, needle) {
+    const e = Module.enumerateExports(lib).find(x => x.name.indexOf(needle) >= 0);
+    if (!e) throw new Error("symbol not found: " + needle);
+    return e.address;
+}
+const vc_hook_add = new NativeFunction(
+    sym("libtrace.so", "vc_hook_add"),
+    'int', ['pointer', 'pointer', 'int', 'pointer', 'pointer', 'uint64', 'uint64']);
+
+const VC_HOOK_EMU_STOP = 1 << 22;
+
+const ctxOut = Memory.alloc(Process.pointerSize);
+const wrapper = trace3(target, path, ctxOut);   // 跑在 VM 里；ctx 写回 ctxOut
+const ctx = ctxOut.readPointer();
+
+// 这一趟 trace 跑完（目标函数返回）就回调 → 在里面把入口还原
+const onDone = new NativeCallback(function (vmctx, ud) {
+    Interceptor.revert(target);                 // 还原入口：之后的调用走原函数，不再 trace
+}, 'void', ['pointer', 'pointer']);
+
+const hh = Memory.alloc(Process.pointerSize);   // vc_hook_h 出参
+vc_hook_add(ctx, hh, VC_HOOK_EMU_STOP, onDone, ptr(0), uint64(0), uint64(0));
+
+Interceptor.replace(target, wrapper);           // 等 app 调用 → 采完这一趟就自动还原
+```
+
+> **注意，这一步不是必须的。** 它只是「采完就把入口还回去」的一个便利写法，口径是**「trace 完成后取消 hook」**，
+> **并不保证"只 trace 一次"**：我们的 trace 本身支持多线程并发，还原前若已有别的线程/调用进入，那几趟照样会被
+> trace。只是想采一遍就收手时用它，常规场景直接 `Interceptor.replace` 让它一直 trace 即可。
+
 ## 自动追踪被 trace 函数内部创建的线程（可选，默认关）
 
 开启后：被 trace 的函数内部 `pthread_create` 创建的线程，其入口函数自动也进 VM 执行、产生独立 trace，
